@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { useMapStore } from '../store/useMapStore'
-import type { Route } from '../types'
+import type { Route, RouteStep } from '../types'
 
 interface RouteCandidate {
   geometry: { type: 'LineString'; coordinates: [number, number][] }
   distanceMeters: number
   durationSeconds: number
   name?: string
+  steps?: RouteStep[]
 }
 
 interface RoutePopoverProps {
@@ -38,7 +39,10 @@ export default function RoutePopover({
   const { addRoute, updateRoute, project } = useMapStore()
   const fromName = startLocationId ? project.locations.find(l => l.id === startLocationId)?.name : null
   const toName = endLocationId ? project.locations.find(l => l.id === endLocationId)?.name : null
-  const [label, setLabel] = useState(editingRoute?.label || '')
+  const defaultLabel = !editingRoute && (fromName || toName)
+    ? [fromName, toName].filter(Boolean).join(' to ')
+    : ''
+  const [label, setLabel] = useState(editingRoute?.label || defaultLabel)
   const [color, setColor] = useState(editingRoute?.color || '#EF4444')
   const [notes, setNotes] = useState(editingRoute?.notes || '')
   const [checkedIndices, setCheckedIndices] = useState<Set<number>>(new Set([0]))
@@ -67,6 +71,7 @@ export default function RoutePopover({
         durationSeconds: selected.durationSeconds,
         color,
         notes: notes.trim() || undefined,
+        steps: selected.steps,
       })
     } else {
       const multi = indices.length > 1
@@ -84,6 +89,7 @@ export default function RoutePopover({
           durationSeconds: c.durationSeconds,
           color,
           notes: notes.trim() || undefined,
+          steps: c.steps,
         })
       }
     }
@@ -93,7 +99,7 @@ export default function RoutePopover({
   return (
     <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 w-80">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-semibold text-gray-800">Save Route</h3>
+        <h3 className="font-semibold text-gray-800">{editingRoute ? 'Edit Route' : 'Save Route'}</h3>
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
       </div>
 

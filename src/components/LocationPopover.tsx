@@ -7,11 +7,12 @@ interface LocationPopoverProps {
   onClose: () => void
   editingLocation?: Location
   initialName?: string
+  onSaved?: (coords: { lat: number; lng: number }, name: string) => void
 }
 
 const COLORS = ['#3B82F6', '#EF4444', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16']
 
-export default function LocationPopover({ coordinates, onClose, editingLocation, initialName }: LocationPopoverProps) {
+export default function LocationPopover({ coordinates, onClose, editingLocation, initialName, onSaved }: LocationPopoverProps) {
   const { addLocation, updateLocation } = useMapStore()
   const [name, setName] = useState(editingLocation?.name || initialName || '')
   const [category, setCategory] = useState(editingLocation?.category?.join(', ') || '')
@@ -49,6 +50,7 @@ export default function LocationPopover({ coordinates, onClose, editingLocation,
       updateLocation(editingLocation.id, data)
     } else {
       addLocation(data)
+      onSaved?.(coordinates, data.name)
     }
     onClose()
   }

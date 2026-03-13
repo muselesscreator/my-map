@@ -4,6 +4,18 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { useMapStore } from '../store/useMapStore'
 import type { Route } from '../types'
 
+function getStyleTextFont(map: maplibregl.Map): string[] {
+  for (const layer of map.getStyle()?.layers ?? []) {
+    if (layer.type === 'symbol' && !layer.id.startsWith('route-')) {
+      try {
+        const font = map.getLayoutProperty(layer.id, 'text-font')
+        if (Array.isArray(font) && font.length > 0) return font as string[]
+      } catch { /* ignore */ }
+    }
+  }
+  return ['Noto Sans Regular']
+}
+
 interface RoutePreview {
   candidates: Array<{
     geometry: { type: 'LineString'; coordinates: [number, number][] }
@@ -16,21 +28,50 @@ interface MapViewProps {
   onMapReady?: (map: maplibregl.Map) => void
   routePreview?: RoutePreview | null
   manualDrawPoints?: [number, number][]
+  activeCategory?: string | null
 }
 
 const PREVIEW_SLOTS = 5
 
+// In "My Map" mode, hide road/building/POI layers from the base tile style,
+// leaving only geographic context (land, water, boundaries, place labels).
+function hideNonEssentialLayers(map: maplibregl.Map) {
+  const hideSourceLayers = new Set([
+    'transportation_name',
+    'poi',
+    'housenumber',
+    'aeroway',
+  ])
+  const layers = map.getStyle()?.layers ?? []
+  layers.forEach((layer) => {
+    // Never touch our own app layers
+    if (layer.id.startsWith('route-') || layer.id.startsWith('preview-')) return
+    const sourceLayer = (layer as unknown as Record<string, string>)['source-layer'] ?? ''
+    if (hideSourceLayers.has(sourceLayer)) {
+      try { map.setLayoutProperty(layer.id, 'visibility', 'none') } catch { /* ignore */ }
+    }
+  })
+}
+
 function applySavedRoutesToMap(map: maplibregl.Map, routes: Route[]) {
+  const { viewMode } = useMapStore.getState()
+  const showLabels = viewMode === 'mymap'
+
   const currentRouteIds = new Set(routes.map((r) => r.id))
   map.getStyle()?.layers?.forEach((layer) => {
-    if (layer.id.startsWith('route-layer-')) {
-      const routeId = layer.id.replace('route-layer-', '')
+    if (layer.id.startsWith('route-layer-') || layer.id.startsWith('route-labels-layer-')) {
+      const routeId = layer.id.replace('route-layer-', '').replace('route-labels-layer-', '')
       if (!currentRouteIds.has(routeId)) {
         if (map.getLayer(layer.id)) map.removeLayer(layer.id)
-        if (map.getSource(`route-${routeId}`)) map.removeSource(`route-${routeId}`)
+        const sourceId = layer.id.startsWith('route-labels-layer-')
+          ? `route-labels-${routeId}`
+          : `route-${routeId}`
+        if (map.getSource(sourceId)) map.removeSource(sourceId)
       }
     }
   })
+
+  const textFont = showLabels ? getStyleTextFont(map) : []
 
   routes.forEach((route) => {
     const sourceId = `route-${route.id}`
@@ -66,10 +107,49 @@ function applySavedRoutesToMap(map: maplibregl.Map, routes: Route[]) {
         'line-opacity': 0.8,
       },
     })
+
+    // Street name labels along each step segment (My Map mode only)
+    const labelsSourceId = `route-labels-${route.id}`
+    const labelsLayerId = `route-labels-layer-${route.id}`
+    if (map.getLayer(labelsLayerId)) map.removeLayer(labelsLayerId)
+    if (map.getSource(labelsSourceId)) map.removeSource(labelsSourceId)
+
+    if (showLabels && route.steps && route.steps.length > 0) {
+      map.addSource(labelsSourceId, {
+        type: 'geojson',
+        data: {
+          type: 'FeatureCollection',
+          features: route.steps.map((step) => ({
+            type: 'Feature' as const,
+            properties: { name: step.name },
+            geometry: step.geometry,
+          })),
+        },
+      })
+      map.addLayer({
+        id: labelsLayerId,
+        type: 'symbol',
+        source: labelsSourceId,
+        layout: {
+          'symbol-placement': 'line',
+          'text-field': ['get', 'name'],
+          'text-font': textFont,
+          'text-size': 11,
+          'symbol-spacing': 200,
+          'text-max-angle': 30,
+          'text-padding': 2,
+        },
+        paint: {
+          'text-color': '#1e293b',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 2,
+        },
+      })
+    }
   })
 }
 
-export default function MapView({ onMapClick, onMapReady, routePreview, manualDrawPoints }: MapViewProps) {
+export default function MapView({ onMapClick, onMapReady, routePreview, manualDrawPoints, activeCategory }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const markersRef = useRef<Map<string, maplibregl.Marker>>(new Map())
@@ -121,7 +201,7 @@ export default function MapView({ onMapClick, onMapReady, routePreview, manualDr
       // Just handle fitBounds for mymap once the map is idle.
       styleReadyRef.current = true
       if (viewMode === 'mymap') {
-        const onIdle = () => fitToContent(map)
+        const onIdle = () => { hideNonEssentialLayers(map); fitToContent(map) }
         map.once('idle', onIdle)
         return () => { map.off('idle', onIdle) }
       }
@@ -142,7 +222,7 @@ export default function MapView({ onMapClick, onMapReady, routePreview, manualDr
     map.once('idle', reapplySavedRoutesOnIdle)
 
     if (viewMode === 'mymap') {
-      const onIdle = () => fitToContent(map)
+      const onIdle = () => { hideNonEssentialLayers(map); fitToContent(map) }
       map.once('idle', onIdle)
       return () => { map.off('idle', onIdle); map.off('idle', reapplySavedRoutesOnIdle) }
     }
@@ -180,24 +260,31 @@ export default function MapView({ onMapClick, onMapReady, routePreview, manualDr
     const map = mapRef.current
     if (!map) return
 
-    const existingIds = new Set(markersRef.current.keys())
-    const currentIds = new Set(project.locations.map((l) => l.id))
-
-    existingIds.forEach((id) => {
-      if (!currentIds.has(id)) {
-        markersRef.current.get(id)?.remove()
-        markersRef.current.delete(id)
-      }
-    })
+    // Remove all existing markers so they are fully recreated on every update.
+    // This keeps markers in sync if a location's name, color, or icon changes.
+    markersRef.current.forEach((m) => m.remove())
+    markersRef.current.clear()
 
     project.locations.forEach((loc) => {
       if (!markersRef.current.has(loc.id)) {
+        const wrapper = document.createElement('div')
+        wrapper.className = 'flex flex-col items-center cursor-pointer'
+        wrapper.style.transform = 'translateX(-50%)'
+
         const el = document.createElement('div')
-        el.className = 'w-8 h-8 rounded-full border-2 border-white shadow-md flex items-center justify-center text-white font-bold text-sm cursor-pointer'
+        el.className = 'w-8 h-8 rounded-full border-2 border-white shadow-md flex items-center justify-center text-white font-bold text-sm'
         el.style.backgroundColor = loc.color || '#3B82F6'
         el.textContent = loc.icon || loc.name.charAt(0).toUpperCase()
 
-        const marker = new maplibregl.Marker({ element: el })
+        const label = document.createElement('div')
+        label.className = 'mt-1 px-1.5 py-0.5 rounded text-xs font-semibold text-gray-900 whitespace-nowrap pointer-events-none'
+        label.style.cssText = 'background: rgba(255,255,255,0.92); box-shadow: 0 1px 3px rgba(0,0,0,0.25); font-size: 12px; line-height: 1.4;'
+        label.textContent = loc.name
+
+        wrapper.appendChild(el)
+        wrapper.appendChild(label)
+
+        const marker = new maplibregl.Marker({ element: wrapper, anchor: 'top' })
           .setLngLat([loc.coordinates.lng, loc.coordinates.lat])
           .setPopup(new maplibregl.Popup({ offset: 25 }).setHTML(
             `<strong>${loc.name}</strong>${loc.notes ? `<br/><span class="text-sm text-gray-600">${loc.notes}</span>` : ''}`
@@ -208,6 +295,18 @@ export default function MapView({ onMapClick, onMapReady, routePreview, manualDr
     })
   }, [project.locations])
 
+  // ── Marker visibility (category filter) ─────────────────────────────────────
+  useEffect(() => {
+    if (!mapRef.current) return
+    const homeId = project.locations.find((l) => l.name.toLowerCase() === 'home')?.id
+    project.locations.forEach((loc) => {
+      const marker = markersRef.current.get(loc.id)
+      if (!marker) return
+      const visible = !activeCategory || loc.id === homeId || (loc.category?.includes(activeCategory) ?? false)
+      marker.getElement().style.display = visible ? '' : 'none'
+    })
+  }, [project.locations, activeCategory])
+
   // ── Saved route layers ──────────────────────────────────────────────────────
   // Uses 'style.load' so layers are re-added after every setStyle call too.
   useEffect(() => {
@@ -215,7 +314,19 @@ export default function MapView({ onMapClick, onMapReady, routePreview, manualDr
     if (!map) return
 
     const applyRoutes = () => {
-      applySavedRoutesToMap(map, project.routes)
+      let visibleRoutes = project.routes
+      if (activeCategory) {
+        const visibleLocIds = new Set(
+          project.locations
+            .filter((l) => l.name.toLowerCase() === 'home' || (l.category?.includes(activeCategory) ?? false))
+            .map((l) => l.id)
+        )
+        visibleRoutes = project.routes.filter(
+          (r) => r.startLocationId !== null && r.endLocationId !== null &&
+            visibleLocIds.has(r.startLocationId) && visibleLocIds.has(r.endLocationId)
+        )
+      }
+      applySavedRoutesToMap(map, visibleRoutes)
     }
 
     // Re-apply after every style load (initial + after setStyle)
@@ -227,7 +338,7 @@ export default function MapView({ onMapClick, onMapReady, routePreview, manualDr
     return () => {
       map.off('style.load', applyRoutes)
     }
-  }, [project.routes]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [project.routes, project.locations, activeCategory]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Route candidate preview ─────────────────────────────────────────────────
   useEffect(() => {

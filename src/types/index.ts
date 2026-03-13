@@ -10,6 +10,11 @@ export interface Location {
   createdAt: string
 }
 
+export interface RouteStep {
+  name: string
+  geometry: { type: 'LineString'; coordinates: [number, number][] }
+}
+
 export interface Route {
   id: string
   label?: string
@@ -22,6 +27,7 @@ export interface Route {
   durationSeconds: number
   color?: string
   notes?: string
+  steps?: RouteStep[]
   createdAt: string
 }
 

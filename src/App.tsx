@@ -7,7 +7,7 @@ import MapView from './components/MapView'
 import LocationPopover from './components/LocationPopover'
 import RoutePopover from './components/RoutePopover'
 import { useMapStore } from './store/useMapStore'
-import type { Location, Route } from './types'
+import type { Location, Route, RouteStep } from './types'
 import { saveAs } from 'file-saver'
 
 type AppMode = 'idle' | 'adding-location' | 'route-start' | 'route-end' | 'drawing-route'
@@ -36,6 +36,7 @@ interface RouteCandidates {
     distanceMeters: number
     durationSeconds: number
     name?: string
+    steps?: RouteStep[]
   }>
   startCoords: { lat: number; lng: number }
   endCoords: { lat: number; lng: number }
@@ -59,24 +60,31 @@ export default function App() {
   const [loadingRoute, setLoadingRoute] = useState(false)
   const [manualPoints, setManualPoints] = useState<[number, number][]>([])
   const [map, setMap] = useState<maplibregl.Map | null>(null)
+  const [editingLocation, setEditingLocation] = useState<Location | null>(null)
+  const [editingRoute, setEditingRoute] = useState<Route | null>(null)
+  const [activeCategory, setActiveCategory] = useState<string | null>(null)
   const { project, viewMode } = useMapStore()
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Escape key: cancel current mode
+  // Escape key: cancel current mode or close edit popovers
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && mode !== 'idle') {
-        setMode('idle')
-        setPendingCoords(null)
-        setPendingName(undefined)
-        setRouteStart(null)
-        setRouteCandidates(null)
-        setManualPoints([])
+      if (e.key === 'Escape') {
+        if (editingLocation) { setEditingLocation(null); return }
+        if (editingRoute) { setEditingRoute(null); return }
+        if (mode !== 'idle') {
+          setMode('idle')
+          setPendingCoords(null)
+          setPendingName(undefined)
+          setRouteStart(null)
+          setRouteCandidates(null)
+          setManualPoints([])
+        }
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [mode])
+  }, [mode, editingLocation, editingRoute])
 
   // Finish manual drawing and open RoutePopover
   const finishDrawing = useCallback(() => {
@@ -125,17 +133,22 @@ export default function App() {
       const endLocationId = snap?.id ?? null
       setLoadingRoute(true)
       try {
-        const coord = `${routeStart.coords.lng},${routeStart.coords.lat};${endCoords.lng},${endCoords.lat}?geometries=geojson&overview=full`
+        const coord = `${routeStart.coords.lng},${routeStart.coords.lat};${endCoords.lng},${endCoords.lat}?geometries=geojson&overview=full&steps=true`
         const results = await Promise.allSettled(
           ROUTE_PROFILES.map(async (p) => {
             const res = await fetch(`${p.url}${coord}`)
             const data = await res.json()
             if (!data.routes?.[0]) throw new Error('No route')
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const steps: RouteStep[] = (data.routes[0].legs ?? []).flatMap((leg: any) => leg.steps ?? [])
+              .filter((s: any) => s.name?.trim())
+              .map((s: any) => ({ name: s.name as string, geometry: s.geometry as RouteStep['geometry'] }))
             return {
               name: p.name,
               geometry: data.routes[0].geometry as { type: 'LineString'; coordinates: [number, number][] },
               distanceMeters: data.routes[0].distance as number,
               durationSeconds: data.routes[0].duration as number,
+              steps,
             }
           })
         )
@@ -217,6 +230,62 @@ export default function App() {
     }
     setPendingCoords(coords)
     setPendingName(name)
+  }
+
+  const handleLocationSaved = async (newCoords: { lat: number; lng: number }, newName: string) => {
+    // Skip if the new location is Home itself
+    if (newName.toLowerCase() === 'home') return
+
+    // Find the Home location in the store (location was just added so store is up to date)
+    const home = useMapStore.getState().project.locations.find(
+      (l) => l.name.toLowerCase() === 'home'
+    )
+    if (!home) return
+
+    // Find the newly saved location to get its ID
+    const newLoc = useMapStore.getState().project.locations.find(
+      (l) => l.coordinates.lat === newCoords.lat && l.coordinates.lng === newCoords.lng && l.name === newName
+    )
+
+    setLoadingRoute(true)
+    try {
+      const coord = `${home.coordinates.lng},${home.coordinates.lat};${newCoords.lng},${newCoords.lat}?geometries=geojson&overview=full&steps=true`
+      const results = await Promise.allSettled(
+        ROUTE_PROFILES.map(async (p) => {
+          const res = await fetch(`${p.url}${coord}`)
+          const data = await res.json()
+          if (!data.routes?.[0]) throw new Error('No route')
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const steps: RouteStep[] = (data.routes[0].legs ?? []).flatMap((leg: any) => leg.steps ?? [])
+            .filter((s: any) => s.name?.trim())
+            .map((s: any) => ({ name: s.name as string, geometry: s.geometry as RouteStep['geometry'] }))
+          return {
+            name: p.name,
+            geometry: data.routes[0].geometry as { type: 'LineString'; coordinates: [number, number][] },
+            distanceMeters: data.routes[0].distance as number,
+            durationSeconds: data.routes[0].duration as number,
+            steps,
+          }
+        })
+      )
+      const candidates = results
+        .filter((r) => r.status === 'fulfilled')
+        .map((r) => (r as PromiseFulfilledResult<{ name: string; geometry: { type: 'LineString'; coordinates: [number, number][] }; distanceMeters: number; durationSeconds: number }>).value)
+      if (candidates.length > 0) {
+        setSelectedRouteIdx(0)
+        setRouteCandidates({
+          candidates,
+          startCoords: home.coordinates,
+          endCoords: newCoords,
+          startLocationId: home.id,
+          endLocationId: newLoc?.id ?? null,
+        })
+      }
+    } catch {
+      // silently skip if routing fails
+    } finally {
+      setLoadingRoute(false)
+    }
   }
 
   const handleExportPNG = () => {
@@ -337,6 +406,10 @@ export default function App() {
           onLocationClick={handleLocationClick}
           onRouteClick={handleRouteClick}
           onSearchResultClick={handleSearchResultClick}
+          onEditLocation={(loc) => { setPendingCoords(null); setEditingRoute(null); setEditingLocation(loc) }}
+          onEditRoute={(route) => { setRouteCandidates(null); setEditingLocation(null); setEditingRoute(route) }}
+          activeCategory={activeCategory}
+          onCategoryChange={setActiveCategory}
         />
         <main className={`flex-1 relative ${getCursorClass()}`}>
           {/* Mode indicator */}
@@ -371,15 +444,24 @@ export default function App() {
             onMapReady={setMap}
             routePreview={routeCandidates ? { candidates: routeCandidates.candidates, selectedIdx: selectedRouteIdx } : null}
             manualDrawPoints={mode === 'drawing-route' ? manualPoints : undefined}
+            activeCategory={activeCategory}
           />
-          {pendingCoords && (
+          {pendingCoords && !editingLocation && (
             <LocationPopover
               coordinates={pendingCoords}
               onClose={() => { setPendingCoords(null); setPendingName(undefined) }}
               initialName={pendingName}
+              onSaved={handleLocationSaved}
             />
           )}
-          {routeCandidates && (
+          {editingLocation && (
+            <LocationPopover
+              coordinates={editingLocation.coordinates}
+              onClose={() => setEditingLocation(null)}
+              editingLocation={editingLocation}
+            />
+          )}
+          {routeCandidates && !editingRoute && (
             <RoutePopover
               candidates={routeCandidates.candidates}
               startCoordinates={routeCandidates.startCoords}
@@ -389,6 +471,23 @@ export default function App() {
               selectedIdx={selectedRouteIdx}
               onSelectIdx={setSelectedRouteIdx}
               onClose={() => { setRouteCandidates(null); setSelectedRouteIdx(0) }}
+            />
+          )}
+          {editingRoute && (
+            <RoutePopover
+              candidates={[{
+                geometry: editingRoute.geometry,
+                distanceMeters: editingRoute.distanceMeters,
+                durationSeconds: editingRoute.durationSeconds,
+              }]}
+              startCoordinates={editingRoute.startCoordinates}
+              endCoordinates={editingRoute.endCoordinates}
+              startLocationId={editingRoute.startLocationId}
+              endLocationId={editingRoute.endLocationId}
+              selectedIdx={0}
+              onSelectIdx={() => {}}
+              onClose={() => setEditingRoute(null)}
+              editingRoute={editingRoute}
             />
           )}
         </main>

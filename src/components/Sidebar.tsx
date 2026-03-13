@@ -15,6 +15,10 @@ interface SidebarProps {
   onLocationClick: (loc: Location) => void
   onRouteClick: (route: Route) => void
   onSearchResultClick: (coords: { lat: number; lng: number }, name: string) => void
+  onEditLocation: (loc: Location) => void
+  onEditRoute: (route: Route) => void
+  activeCategory: string | null
+  onCategoryChange: (cat: string | null) => void
 }
 
 function formatDistance(meters: number) {
@@ -33,6 +37,10 @@ export default function Sidebar({
   onLocationClick,
   onRouteClick,
   onSearchResultClick,
+  onEditLocation,
+  onEditRoute,
+  activeCategory,
+  onCategoryChange,
 }: SidebarProps) {
   const { project, viewMode, removeLocation, removeRoute } = useMapStore()
   const [expandedSection, setExpandedSection] = useState<'locations' | 'routes' | 'both'>('both')
@@ -43,9 +51,6 @@ export default function Sidebar({
   const [isSearching, setIsSearching] = useState(false)
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const searchContainerRef = useRef<HTMLDivElement>(null)
-
-  // Category filter state
-  const [activeCategory, setActiveCategory] = useState<string | null>(null)
 
   const isReadOnly = viewMode === 'mymap'
 
@@ -157,7 +162,7 @@ export default function Sidebar({
         {allCategories.length > 0 && (
           <div className="flex flex-wrap gap-1 px-2 py-1.5 border-b border-gray-100">
             <button
-              onClick={() => setActiveCategory(null)}
+              onClick={() => onCategoryChange(null)}
               className={`px-2 py-0.5 rounded-full text-xs font-medium border transition-colors ${
                 activeCategory === null
                   ? 'bg-blue-600 text-white border-blue-600'
@@ -169,7 +174,7 @@ export default function Sidebar({
             {allCategories.map((cat) => (
               <button
                 key={cat}
-                onClick={() => setActiveCategory(activeCategory === cat ? null : cat)}
+                onClick={() => onCategoryChange(activeCategory === cat ? null : cat)}
                 className={`px-2 py-0.5 rounded-full text-xs font-medium border transition-colors ${
                   activeCategory === cat
                     ? 'bg-blue-600 text-white border-blue-600'
@@ -202,13 +207,22 @@ export default function Sidebar({
                 )}
               </div>
               {!isReadOnly && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); removeLocation(loc.id) }}
-                  className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 text-xs px-1"
-                  title="Remove"
-                >
-                  ✕
-                </button>
+                <>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onEditLocation(loc) }}
+                    className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-blue-500 text-xs px-1"
+                    title="Edit"
+                  >
+                    ✎
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); removeLocation(loc.id) }}
+                    className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 text-xs px-1"
+                    title="Remove"
+                  >
+                    ✕
+                  </button>
+                </>
               )}
             </li>
           ))}
@@ -254,13 +268,22 @@ export default function Sidebar({
                 </div>
               </div>
               {!isReadOnly && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); removeRoute(route.id) }}
-                  className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 text-xs px-1"
-                  title="Remove"
-                >
-                  ✕
-                </button>
+                <>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onEditRoute(route) }}
+                    className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-blue-500 text-xs px-1"
+                    title="Edit"
+                  >
+                    ✎
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); removeRoute(route.id) }}
+                    className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 text-xs px-1"
+                    title="Remove"
+                  >
+                    ✕
+                  </button>
+                </>
               )}
             </li>
           ))}
