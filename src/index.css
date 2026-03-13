@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; padding: 0; }
+
+.mapboxgl-map { font-family: inherit; }
+
+@media print {
+  header, aside { display: none !important; }
+  main { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; }
+  .mapboxgl-ctrl { display: none !important; }
+}
