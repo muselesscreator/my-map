@@ -464,6 +464,12 @@ export default function App() {
   const handleExportGeoJSON = () => {
     const geojson = {
       type: 'FeatureCollection',
+      mymap: {
+        id: project.id,
+        name: project.name,
+        defaultCenter: project.defaultCenter,
+        defaultZoom: project.defaultZoom,
+      },
       features: [
         ...project.locations.map((loc) => ({
           type: 'Feature',
@@ -533,13 +539,22 @@ export default function App() {
                 durationSeconds: p.durationSeconds ?? 0,
                 color: p.color,
                 notes: p.notes,
+                steps: p.steps,
                 groupId: p.groupId,
                 createdAt: p.createdAt ?? new Date().toISOString(),
               })
             }
           }
           const current = useMapStore.getState().project
-          useMapStore.getState().importProject({ ...current, locations, routes })
+          const meta = data.mymap ?? {}
+          useMapStore.getState().importProject({
+            id: meta.id ?? current.id,
+            name: meta.name ?? current.name,
+            defaultCenter: meta.defaultCenter ?? current.defaultCenter,
+            defaultZoom: meta.defaultZoom ?? current.defaultZoom,
+            locations,
+            routes,
+          })
         } else {
           alert('Import format not recognized. Please import a previously exported MyMap GeoJSON or a native MapProject file.')
         }
