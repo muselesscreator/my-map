@@ -299,8 +299,21 @@ export default function MapView({ onMapClick, onMapReady, onLocationMarkerClick,
         wrapper.style.transform = 'translateX(-50%)'
 
         const el = document.createElement('div')
-        el.className = 'w-8 h-8 rounded-full border-2 border-white shadow-md flex items-center justify-center text-white font-bold text-sm'
-        el.style.backgroundColor = loc.color || '#3B82F6'
+        el.style.cssText = `
+          width: 46px;
+          height: 46px;
+          border-radius: 50%;
+          border: 3px solid white;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.45), 0 1px 4px rgba(0,0,0,0.3), inset 0 1px 1px rgba(255,255,255,0.25);
+          background-color: ${loc.color || '#3B82F6'};
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 22px;
+          line-height: 1;
+          cursor: pointer;
+          user-select: none;
+        `
         el.textContent = loc.icon || loc.name.charAt(0).toUpperCase()
 
         const label = document.createElement('div')
