@@ -5,17 +5,20 @@ import type { Location, Route, MapProject } from '../types'
 
 interface MapStore {
   project: MapProject
-  viewMode: 'edit' | 'mymap'
+  viewMode: 'edit' | 'mymap' | 'directions'
+  isOffline: boolean
   // Location actions
   addLocation: (loc: Omit<Location, 'id' | 'createdAt'>) => void
   updateLocation: (id: string, updates: Partial<Location>) => void
   removeLocation: (id: string) => void
   // Route actions
   addRoute: (route: Omit<Route, 'id' | 'createdAt'>) => void
+  addRoutes: (routes: Omit<Route, 'id' | 'createdAt'>[]) => void
   updateRoute: (id: string, updates: Partial<Route>) => void
   removeRoute: (id: string) => void
   // View
-  setViewMode: (mode: 'edit' | 'mymap') => void
+  setViewMode: (mode: 'edit' | 'mymap' | 'directions') => void
+  setOffline: (value: boolean) => void
   // Import/Export
   importProject: (project: MapProject) => void
 }
@@ -34,6 +37,7 @@ export const useMapStore = create<MapStore>()(
     (set) => ({
       project: defaultProject,
       viewMode: 'edit',
+      isOffline: false,
       addLocation: (loc) =>
         set((state) => ({
           project: {
@@ -73,6 +77,16 @@ export const useMapStore = create<MapStore>()(
             ],
           },
         })),
+      addRoutes: (routes) =>
+        set((state) => ({
+          project: {
+            ...state.project,
+            routes: [
+              ...state.project.routes,
+              ...routes.map((r) => ({ ...r, id: uuidv4(), createdAt: new Date().toISOString() })),
+            ],
+          },
+        })),
       updateRoute: (id, updates) =>
         set((state) => ({
           project: {
@@ -90,6 +104,7 @@ export const useMapStore = create<MapStore>()(
           },
         })),
       setViewMode: (mode) => set({ viewMode: mode }),
+      setOffline: (value) => set({ isOffline: value }),
       importProject: (project) => set({ project }),
     }),
     { name: 'mymap-storage' }

@@ -28,6 +28,7 @@ export interface Route {
   color?: string
   notes?: string
   steps?: RouteStep[]
+  groupId?: string
   createdAt: string
 }
 

@@ -3,6 +3,7 @@ import maplibregl from 'maplibre-gl'
 import { v4 as uuidv4 } from 'uuid'
 import Header from './components/Header'
 import Sidebar from './components/Sidebar'
+import DirectionsPanel from './components/DirectionsPanel'
 import MapView from './components/MapView'
 import LocationPopover from './components/LocationPopover'
 import RoutePopover from './components/RoutePopover'
@@ -30,25 +31,62 @@ function snapToLocation(coords: { lat: number; lng: number }, locations: { id: s
   return best
 }
 
+type RouteCandidate = {
+  geometry: { type: 'LineString'; coordinates: [number, number][] }
+  distanceMeters: number
+  durationSeconds: number
+  name?: string
+  steps?: RouteStep[]
+}
+
 interface RouteCandidates {
-  candidates: Array<{
-    geometry: { type: 'LineString'; coordinates: [number, number][] }
-    distanceMeters: number
-    durationSeconds: number
-    name?: string
-    steps?: RouteStep[]
-  }>
+  candidates: RouteCandidate[]
   startCoords: { lat: number; lng: number }
   endCoords: { lat: number; lng: number }
   startLocationId: string | null
   endLocationId: string | null
+  // Present for home↔location auto-routes — parallel array to candidates (null if that profile failed)
+  returnData?: {
+    candidates: Array<RouteCandidate | null>
+    startCoordinates: { lat: number; lng: number }
+    endCoordinates: { lat: number; lng: number }
+    startLocationId: string | null
+    endLocationId: string | null
+  }
+  groupId?: string
 }
 
+const ORS_API_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImRkNDFiOWZjOGQ3YTRjMmQ5NzUxMjQ5YTUzYjAxNDI0IiwiaCI6Im11cm11cjY0In0='
+
 const ROUTE_PROFILES = [
-  { name: 'Driving', url: 'https://router.project-osrm.org/route/v1/driving/' },
-  { name: 'Walking', url: 'https://routing.openstreetmap.de/routed-foot/route/v1/foot/' },
-  { name: 'Cycling', url: 'https://routing.openstreetmap.de/routed-bike/route/v1/bike/' },
+  { name: 'Driving', profile: 'driving-car' },
 ]
+
+async function fetchORSRoute(
+  profile: string,
+  from: { lat: number; lng: number },
+  to: { lat: number; lng: number }
+): Promise<{ geometry: { type: 'LineString'; coordinates: [number, number][] }; distanceMeters: number; durationSeconds: number; steps: RouteStep[] }> {
+  const url = `https://api.openrouteservice.org/v2/directions/${profile}?api_key=${ORS_API_KEY}&start=${from.lng},${from.lat}&end=${to.lng},${to.lat}`
+  const res = await fetch(url)
+  const data = await res.json()
+  if (!data.features?.[0]) throw new Error('No route')
+  const feature = data.features[0]
+  const routeCoords = feature.geometry.coordinates as [number, number][]
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const steps: RouteStep[] = (feature.properties.segments ?? []).flatMap((seg: any) => seg.steps ?? [])
+    .filter((s: any) => s.name?.trim())
+    .map((s: any) => ({
+      name: s.name as string,
+      geometry: { type: 'LineString' as const, coordinates: routeCoords.slice(s.way_points[0], s.way_points[1] + 1) },
+    }))
+  return {
+    geometry: feature.geometry as { type: 'LineString'; coordinates: [number, number][] },
+    distanceMeters: feature.properties.summary.distance as number,
+    durationSeconds: feature.properties.summary.duration as number,
+    steps,
+  }
+}
 
 export default function App() {
   const [mode, setMode] = useState<AppMode>('idle')
@@ -63,7 +101,10 @@ export default function App() {
   const [editingLocation, setEditingLocation] = useState<Location | null>(null)
   const [editingRoute, setEditingRoute] = useState<Route | null>(null)
   const [activeCategory, setActiveCategory] = useState<string | null>(null)
-  const { project, viewMode } = useMapStore()
+  const [stepHighlightGeometry, setStepHighlightGeometry] = useState<{ type: 'LineString'; coordinates: [number, number][] } | null>(null)
+  const [stepHighlightName, setStepHighlightName] = useState<string | null>(null)
+  const [directionsMapStyle, setDirectionsMapStyle] = useState<'full' | 'mymap'>('full')
+  const { project, viewMode, isOffline } = useMapStore()
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Escape key: cancel current mode or close edit popovers
@@ -131,30 +172,47 @@ export default function App() {
       const snap = snapToLocation(coords, project.locations)
       const endCoords = snap?.coordinates ?? coords
       const endLocationId = snap?.id ?? null
+      const groupId = uuidv4()
+      if (isOffline) {
+        const dist = haversineM(routeStart.coords, endCoords)
+        const fwdGeom = { type: 'LineString' as const, coordinates: [[routeStart.coords.lng, routeStart.coords.lat], [endCoords.lng, endCoords.lat]] as [number, number][] }
+        const bwdGeom = { type: 'LineString' as const, coordinates: [[endCoords.lng, endCoords.lat], [routeStart.coords.lng, routeStart.coords.lat]] as [number, number][] }
+        setSelectedRouteIdx(0)
+        setRouteCandidates({
+          candidates: [{ name: 'Straight line', geometry: fwdGeom, distanceMeters: dist, durationSeconds: dist / 11 }],
+          startCoords: routeStart.coords,
+          endCoords,
+          startLocationId: routeStart.locationId,
+          endLocationId,
+          returnData: {
+            candidates: [{ name: 'Straight line', geometry: bwdGeom, distanceMeters: dist, durationSeconds: dist / 11 }],
+            startCoordinates: endCoords,
+            endCoordinates: routeStart.coords,
+            startLocationId: endLocationId,
+            endLocationId: routeStart.locationId,
+          },
+          groupId,
+        })
+        setMode('idle')
+        setRouteStart(null)
+      } else {
       setLoadingRoute(true)
       try {
-        const coord = `${routeStart.coords.lng},${routeStart.coords.lat};${endCoords.lng},${endCoords.lat}?geometries=geojson&overview=full&steps=true`
-        const results = await Promise.allSettled(
-          ROUTE_PROFILES.map(async (p) => {
-            const res = await fetch(`${p.url}${coord}`)
-            const data = await res.json()
-            if (!data.routes?.[0]) throw new Error('No route')
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const steps: RouteStep[] = (data.routes[0].legs ?? []).flatMap((leg: any) => leg.steps ?? [])
-              .filter((s: any) => s.name?.trim())
-              .map((s: any) => ({ name: s.name as string, geometry: s.geometry as RouteStep['geometry'] }))
-            return {
-              name: p.name,
-              geometry: data.routes[0].geometry as { type: 'LineString'; coordinates: [number, number][] },
-              distanceMeters: data.routes[0].distance as number,
-              durationSeconds: data.routes[0].duration as number,
-              steps,
-            }
-          })
+        type RC = { name: string; geometry: { type: 'LineString'; coordinates: [number, number][] }; distanceMeters: number; durationSeconds: number; steps: RouteStep[] }
+        const allResults = await Promise.allSettled(
+          ROUTE_PROFILES.flatMap((p) => [
+            fetchORSRoute(p.profile, routeStart.coords, endCoords).then((d) => ({ name: p.name, ...d })),
+            fetchORSRoute(p.profile, endCoords, routeStart.coords).then((d) => ({ name: p.name, ...d })),
+          ])
         )
-        const candidates = results
-          .filter((r) => r.status === 'fulfilled')
-          .map((r) => (r as PromiseFulfilledResult<{ name: string; geometry: { type: 'LineString'; coordinates: [number, number][] }; distanceMeters: number; durationSeconds: number }>).value)
+        const fwdByProfile: Array<RC | null> = ROUTE_PROFILES.map((_, i) => {
+          const r = allResults[i * 2]; return r.status === 'fulfilled' ? (r as PromiseFulfilledResult<RC>).value : null
+        })
+        const retByProfile: Array<RC | null> = ROUTE_PROFILES.map((_, i) => {
+          const r = allResults[i * 2 + 1]; return r.status === 'fulfilled' ? (r as PromiseFulfilledResult<RC>).value : null
+        })
+        const candidates = fwdByProfile.filter((c): c is RC => c !== null)
+        const returnCandidates = fwdByProfile.map((fwd, i) => fwd !== null ? retByProfile[i] : null).filter((_, i) => fwdByProfile[i] !== null)
         if (candidates.length > 0) {
           setSelectedRouteIdx(0)
           setRouteCandidates({
@@ -163,6 +221,14 @@ export default function App() {
             endCoords,
             startLocationId: routeStart.locationId,
             endLocationId,
+            returnData: {
+              candidates: returnCandidates,
+              startCoordinates: endCoords,
+              endCoordinates: routeStart.coords,
+              startLocationId: endLocationId,
+              endLocationId: routeStart.locationId,
+            },
+            groupId,
           })
         } else {
           throw new Error('All profile fetches failed')
@@ -170,29 +236,29 @@ export default function App() {
       } catch (err) {
         console.error('Route fetch failed, falling back to straight line', err)
         const dist = haversineM(routeStart.coords, endCoords)
+        const fwdGeom = { type: 'LineString' as const, coordinates: [[routeStart.coords.lng, routeStart.coords.lat], [endCoords.lng, endCoords.lat]] as [number, number][] }
+        const bwdGeom = { type: 'LineString' as const, coordinates: [[endCoords.lng, endCoords.lat], [routeStart.coords.lng, routeStart.coords.lat]] as [number, number][] }
         setSelectedRouteIdx(0)
         setRouteCandidates({
-          candidates: [{
-            name: 'Straight line',
-            geometry: {
-              type: 'LineString',
-              coordinates: [
-                [routeStart.coords.lng, routeStart.coords.lat],
-                [endCoords.lng, endCoords.lat],
-              ],
-            },
-            distanceMeters: dist,
-            durationSeconds: dist / 11,
-          }],
+          candidates: [{ name: 'Straight line', geometry: fwdGeom, distanceMeters: dist, durationSeconds: dist / 11 }],
           startCoords: routeStart.coords,
           endCoords,
           startLocationId: routeStart.locationId,
           endLocationId,
+          returnData: {
+            candidates: [{ name: 'Straight line', geometry: bwdGeom, distanceMeters: dist, durationSeconds: dist / 11 }],
+            startCoordinates: endCoords,
+            endCoordinates: routeStart.coords,
+            startLocationId: endLocationId,
+            endLocationId: routeStart.locationId,
+          },
+          groupId,
         })
       } finally {
         setLoadingRoute(false)
         setMode('idle')
         setRouteStart(null)
+      }
       }
     } else if (mode === 'drawing-route') {
       setManualPoints((pts) => [...pts, [coords.lng, coords.lat]])
@@ -210,6 +276,41 @@ export default function App() {
       handleMapClick(loc.coordinates)
     } else if (map) {
       map.flyTo({ center: [loc.coordinates.lng, loc.coordinates.lat], zoom: 15 })
+    }
+  }
+
+  const handleLocationMarkerClick = (locationId: string) => {
+    if (viewMode !== 'edit' || mode !== 'idle') return
+    const loc = project.locations.find((l) => l.id === locationId)
+    if (!loc) return
+    setPendingCoords(null)
+    setEditingRoute(null)
+    setEditingLocation(loc)
+  }
+
+  // Clear step highlight and reset map style when leaving directions mode
+  useEffect(() => {
+    if (viewMode !== 'directions') {
+      setStepHighlightGeometry(null)
+      setStepHighlightName(null)
+      setDirectionsMapStyle('full')
+    }
+  }, [viewMode])
+
+  const handleStepFocus = (geometry: { type: 'LineString'; coordinates: [number, number][] } | null, name?: string) => {
+    setStepHighlightGeometry(geometry)
+    setStepHighlightName(name ?? null)
+    if (geometry && map) {
+      const coords = geometry.coordinates
+      if (coords.length === 1) {
+        map.flyTo({ center: coords[0] as [number, number], zoom: 17 })
+      } else if (coords.length > 1) {
+        const bounds = coords.reduce(
+          (b, c) => b.extend(c as [number, number]),
+          new maplibregl.LngLatBounds(coords[0] as [number, number], coords[0] as [number, number])
+        )
+        map.fitBounds(bounds, { padding: 120, maxZoom: 18 })
+      }
     }
   }
 
@@ -233,8 +334,8 @@ export default function App() {
   }
 
   const handleLocationSaved = async (newCoords: { lat: number; lng: number }, newName: string) => {
-    // Skip if the new location is Home itself
-    if (newName.toLowerCase() === 'home') return
+    // Skip if the new location is Home itself, or if offline
+    if (newName.toLowerCase() === 'home' || isOffline) return
 
     // Find the Home location in the store (location was just added so store is up to date)
     const home = useMapStore.getState().project.locations.find(
@@ -249,28 +350,28 @@ export default function App() {
 
     setLoadingRoute(true)
     try {
-      const coord = `${home.coordinates.lng},${home.coordinates.lat};${newCoords.lng},${newCoords.lat}?geometries=geojson&overview=full&steps=true`
-      const results = await Promise.allSettled(
-        ROUTE_PROFILES.map(async (p) => {
-          const res = await fetch(`${p.url}${coord}`)
-          const data = await res.json()
-          if (!data.routes?.[0]) throw new Error('No route')
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const steps: RouteStep[] = (data.routes[0].legs ?? []).flatMap((leg: any) => leg.steps ?? [])
-            .filter((s: any) => s.name?.trim())
-            .map((s: any) => ({ name: s.name as string, geometry: s.geometry as RouteStep['geometry'] }))
-          return {
-            name: p.name,
-            geometry: data.routes[0].geometry as { type: 'LineString'; coordinates: [number, number][] },
-            distanceMeters: data.routes[0].distance as number,
-            durationSeconds: data.routes[0].duration as number,
-            steps,
-          }
-        })
+      const groupId = uuidv4()
+      // Fetch all profiles for both directions in parallel (6 total)
+      type RC = { name: string; geometry: { type: 'LineString'; coordinates: [number, number][] }; distanceMeters: number; durationSeconds: number; steps: RouteStep[] }
+      const allResults = await Promise.allSettled(
+        ROUTE_PROFILES.flatMap((p) => [
+          fetchORSRoute(p.profile, home.coordinates, newCoords).then((d) => ({ name: p.name, ...d })),
+          fetchORSRoute(p.profile, newCoords, home.coordinates).then((d) => ({ name: p.name, ...d })),
+        ])
       )
-      const candidates = results
-        .filter((r) => r.status === 'fulfilled')
-        .map((r) => (r as PromiseFulfilledResult<{ name: string; geometry: { type: 'LineString'; coordinates: [number, number][] }; distanceMeters: number; durationSeconds: number }>).value)
+
+      // Split results: even indices = forward, odd = return (per profile)
+      const fwdByProfile: Array<RC | null> = ROUTE_PROFILES.map((_, i) => {
+        const r = allResults[i * 2]; return r.status === 'fulfilled' ? (r as PromiseFulfilledResult<RC>).value : null
+      })
+      const retByProfile: Array<RC | null> = ROUTE_PROFILES.map((_, i) => {
+        const r = allResults[i * 2 + 1]; return r.status === 'fulfilled' ? (r as PromiseFulfilledResult<RC>).value : null
+      })
+
+      const candidates = fwdByProfile.filter((c): c is RC => c !== null)
+      // Return candidates aligned to the same indices as candidates (null if that profile's return failed)
+      const returnCandidates = fwdByProfile.flatMap((fwd, i) => fwd !== null ? [retByProfile[i]] : [])
+
       if (candidates.length > 0) {
         setSelectedRouteIdx(0)
         setRouteCandidates({
@@ -279,10 +380,74 @@ export default function App() {
           endCoords: newCoords,
           startLocationId: home.id,
           endLocationId: newLoc?.id ?? null,
+          returnData: {
+            candidates: returnCandidates,
+            startCoordinates: newCoords,
+            endCoordinates: home.coordinates,
+            startLocationId: newLoc?.id ?? null,
+            endLocationId: home.id,
+          },
+          groupId,
         })
       }
     } catch {
       // silently skip if routing fails
+    } finally {
+      setLoadingRoute(false)
+    }
+  }
+
+  const handleBulkAddHomeRoutes = async () => {
+    const state = useMapStore.getState()
+    const home = state.project.locations.find((l) => l.name.toLowerCase() === 'home')
+    if (!home || isOffline) return
+
+    // Check each direction independently
+    const homeToLocIds = new Set(
+      state.project.routes.filter((r) => r.startLocationId === home.id && r.endLocationId).map((r) => r.endLocationId as string)
+    )
+    const locToHomeIds = new Set(
+      state.project.routes.filter((r) => r.endLocationId === home.id && r.startLocationId).map((r) => r.startLocationId as string)
+    )
+
+    const toProcess = state.project.locations
+      .filter((l) => l.id !== home.id)
+      .map((loc) => ({ loc, needsFwd: !homeToLocIds.has(loc.id), needsBwd: !locToHomeIds.has(loc.id) }))
+      .filter(({ needsFwd, needsBwd }) => needsFwd || needsBwd)
+
+    if (toProcess.length === 0) return
+
+    const fetchLeg = (fromCoords: { lat: number; lng: number }, toCoords: { lat: number; lng: number }) =>
+      fetchORSRoute(ROUTE_PROFILES[0].profile, fromCoords, toCoords)
+
+    setLoadingRoute(true)
+    try {
+      // Process one location at a time to avoid overwhelming public routing servers
+      for (const { loc, needsFwd, needsBwd } of toProcess) {
+        // Reuse existing paired route's groupId if only one direction is missing
+        const existingRoute = !needsFwd
+          ? state.project.routes.find((r) => r.startLocationId === home.id && r.endLocationId === loc.id)
+          : !needsBwd
+            ? state.project.routes.find((r) => r.startLocationId === loc.id && r.endLocationId === home.id)
+            : null
+        const groupId = existingRoute?.groupId ?? uuidv4()
+
+        const [fwd, bwd] = await Promise.allSettled([
+          needsFwd ? fetchLeg(home.coordinates, loc.coordinates) : Promise.reject('skipped'),
+          needsBwd ? fetchLeg(loc.coordinates, home.coordinates) : Promise.reject('skipped'),
+        ])
+
+        const routesToAdd: Omit<Route, 'id' | 'createdAt'>[] = []
+        if (needsFwd && fwd.status === 'fulfilled') {
+          routesToAdd.push({ ...fwd.value, startLocationId: home.id, endLocationId: loc.id, startCoordinates: home.coordinates, endCoordinates: loc.coordinates, groupId })
+        }
+        if (needsBwd && bwd.status === 'fulfilled') {
+          routesToAdd.push({ ...bwd.value, startLocationId: loc.id, endLocationId: home.id, startCoordinates: loc.coordinates, endCoordinates: home.coordinates, groupId })
+        }
+        if (routesToAdd.length > 0) {
+          useMapStore.getState().addRoutes(routesToAdd)
+        }
+      }
     } finally {
       setLoadingRoute(false)
     }
@@ -368,6 +533,7 @@ export default function App() {
                 durationSeconds: p.durationSeconds ?? 0,
                 color: p.color,
                 notes: p.notes,
+                groupId: p.groupId,
                 createdAt: p.createdAt ?? new Date().toISOString(),
               })
             }
@@ -399,18 +565,23 @@ export default function App() {
         onImportGeoJSON={handleImportGeoJSON}
       />
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar
-          onAddLocationClick={() => setMode(mode === 'adding-location' ? 'idle' : 'adding-location')}
-          onAddRouteClick={() => setMode(mode === 'route-start' ? 'idle' : 'route-start')}
-          onDrawManualClick={() => { setMode(mode === 'drawing-route' ? 'idle' : 'drawing-route'); setManualPoints([]) }}
-          onLocationClick={handleLocationClick}
-          onRouteClick={handleRouteClick}
-          onSearchResultClick={handleSearchResultClick}
-          onEditLocation={(loc) => { setPendingCoords(null); setEditingRoute(null); setEditingLocation(loc) }}
-          onEditRoute={(route) => { setRouteCandidates(null); setEditingLocation(null); setEditingRoute(route) }}
-          activeCategory={activeCategory}
-          onCategoryChange={setActiveCategory}
-        />
+        {viewMode === 'directions' ? (
+          <DirectionsPanel onStepFocus={handleStepFocus} onMapStyleChange={setDirectionsMapStyle} />
+        ) : (
+          <Sidebar
+            onAddLocationClick={() => setMode(mode === 'adding-location' ? 'idle' : 'adding-location')}
+            onAddRouteClick={() => setMode(mode === 'route-start' ? 'idle' : 'route-start')}
+            onDrawManualClick={() => { setMode(mode === 'drawing-route' ? 'idle' : 'drawing-route'); setManualPoints([]) }}
+            onLocationClick={handleLocationClick}
+            onRouteClick={handleRouteClick}
+            onSearchResultClick={handleSearchResultClick}
+            onEditLocation={(loc) => { setPendingCoords(null); setEditingRoute(null); setEditingLocation(loc) }}
+            onEditRoute={(route) => { setRouteCandidates(null); setEditingLocation(null); setEditingRoute(route) }}
+            activeCategory={activeCategory}
+            onCategoryChange={setActiveCategory}
+            onBulkAddHomeRoutes={handleBulkAddHomeRoutes}
+          />
+        )}
         <main className={`flex-1 relative ${getCursorClass()}`}>
           {/* Mode indicator */}
           {mode !== 'idle' && (
@@ -442,9 +613,13 @@ export default function App() {
           <MapView
             onMapClick={handleMapClick}
             onMapReady={setMap}
+            onLocationMarkerClick={handleLocationMarkerClick}
             routePreview={routeCandidates ? { candidates: routeCandidates.candidates, selectedIdx: selectedRouteIdx } : null}
             manualDrawPoints={mode === 'drawing-route' ? manualPoints : undefined}
             activeCategory={activeCategory}
+            stepHighlightGeometry={viewMode === 'directions' ? stepHighlightGeometry : null}
+            stepHighlightName={viewMode === 'directions' ? stepHighlightName : null}
+            directionsTileStyle={viewMode === 'directions' ? directionsMapStyle : undefined}
           />
           {pendingCoords && !editingLocation && (
             <LocationPopover
@@ -471,6 +646,8 @@ export default function App() {
               selectedIdx={selectedRouteIdx}
               onSelectIdx={setSelectedRouteIdx}
               onClose={() => { setRouteCandidates(null); setSelectedRouteIdx(0) }}
+              returnData={routeCandidates.returnData}
+              groupId={routeCandidates.groupId}
             />
           )}
           {editingRoute && (

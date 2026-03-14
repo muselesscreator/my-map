@@ -26,9 +26,13 @@ interface RoutePreview {
 interface MapViewProps {
   onMapClick?: (coords: { lat: number; lng: number }) => void
   onMapReady?: (map: maplibregl.Map) => void
+  onLocationMarkerClick?: (locationId: string) => void
   routePreview?: RoutePreview | null
   manualDrawPoints?: [number, number][]
   activeCategory?: string | null
+  stepHighlightGeometry?: { type: 'LineString'; coordinates: [number, number][] } | null
+  stepHighlightName?: string | null
+  directionsTileStyle?: 'full' | 'mymap'
 }
 
 const PREVIEW_SLOTS = 5
@@ -149,11 +153,14 @@ function applySavedRoutesToMap(map: maplibregl.Map, routes: Route[]) {
   })
 }
 
-export default function MapView({ onMapClick, onMapReady, routePreview, manualDrawPoints, activeCategory }: MapViewProps) {
+export default function MapView({ onMapClick, onMapReady, onLocationMarkerClick, routePreview, manualDrawPoints, activeCategory, stepHighlightGeometry, stepHighlightName, directionsTileStyle }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const markersRef = useRef<Map<string, maplibregl.Marker>>(new Map())
   const styleReadyRef = useRef(false)
+  const prevDirectionsTileStyleRef = useRef<'full' | 'mymap' | undefined>(undefined)
+  const onLocationMarkerClickRef = useRef(onLocationMarkerClick)
+  onLocationMarkerClickRef.current = onLocationMarkerClick
   const { project, viewMode } = useMapStore()
 
   // ── Map creation ────────────────────────────────────────────────────────────
@@ -244,6 +251,26 @@ export default function MapView({ onMapClick, onMapReady, routePreview, manualDr
     }
   }
 
+  // ── Directions tile style toggle ─────────────────────────────────────────────
+  useEffect(() => {
+    const prev = prevDirectionsTileStyleRef.current
+    prevDirectionsTileStyleRef.current = directionsTileStyle
+    // Only switch when toggling between 'full' and 'mymap' (both non-undefined)
+    if (!prev || !directionsTileStyle) return
+    const map = mapRef.current
+    if (!map) return
+    const style = directionsTileStyle === 'mymap'
+      ? 'https://tiles.openfreemap.org/styles/positron'
+      : 'https://tiles.openfreemap.org/styles/liberty'
+    map.setStyle(style)
+    const reapply = () => {
+      const latestRoutes = useMapStore.getState().project.routes
+      applySavedRoutesToMap(map, latestRoutes)
+    }
+    map.once('idle', reapply)
+    return () => { map.off('idle', reapply) }
+  }, [directionsTileStyle]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Handle map click ────────────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current
@@ -284,11 +311,13 @@ export default function MapView({ onMapClick, onMapReady, routePreview, manualDr
         wrapper.appendChild(el)
         wrapper.appendChild(label)
 
+        wrapper.addEventListener('click', (e) => {
+          e.stopPropagation()
+          onLocationMarkerClickRef.current?.(loc.id)
+        })
+
         const marker = new maplibregl.Marker({ element: wrapper, anchor: 'top' })
           .setLngLat([loc.coordinates.lng, loc.coordinates.lat])
-          .setPopup(new maplibregl.Popup({ offset: 25 }).setHTML(
-            `<strong>${loc.name}</strong>${loc.notes ? `<br/><span class="text-sm text-gray-600">${loc.notes}</span>` : ''}`
-          ))
           .addTo(map)
         markersRef.current.set(loc.id, marker)
       }
@@ -435,6 +464,77 @@ export default function MapView({ onMapClick, onMapReady, routePreview, manualDr
 
     return () => { map.off('idle', draw) }
   }, [manualDrawPoints])
+
+  // ── Step highlight (directions mode) ────────────────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const SOURCE = 'step-highlight'
+    const LAYER = 'step-highlight'
+    const LABEL_SOURCE = 'step-highlight-label'
+    const LABEL_LAYER = 'step-highlight-label'
+
+    const draw = () => {
+      if (!map.isStyleLoaded()) return
+      if (map.getLayer(LABEL_LAYER)) map.removeLayer(LABEL_LAYER)
+      if (map.getSource(LABEL_SOURCE)) map.removeSource(LABEL_SOURCE)
+      if (map.getLayer(LAYER)) map.removeLayer(LAYER)
+      if (map.getSource(SOURCE)) map.removeSource(SOURCE)
+      if (!stepHighlightGeometry || stepHighlightGeometry.coordinates.length < 1) return
+      map.addSource(SOURCE, {
+        type: 'geojson',
+        data: { type: 'Feature', properties: {}, geometry: stepHighlightGeometry },
+      })
+      map.addLayer({
+        id: LAYER,
+        type: 'line',
+        source: SOURCE,
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': '#FBBF24', 'line-width': 7, 'line-opacity': 0.9 },
+      })
+      if (stepHighlightName) {
+        map.addSource(LABEL_SOURCE, {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            properties: { name: stepHighlightName },
+            geometry: stepHighlightGeometry,
+          },
+        })
+        map.addLayer({
+          id: LABEL_LAYER,
+          type: 'symbol',
+          source: LABEL_SOURCE,
+          layout: {
+            'symbol-placement': 'line',
+            'text-field': ['get', 'name'],
+            'text-font': getStyleTextFont(map),
+            'text-size': 13,
+            'symbol-spacing': 150,
+            'text-max-angle': 30,
+          },
+          paint: {
+            'text-color': '#92400e',
+            'text-halo-color': '#fef3c7',
+            'text-halo-width': 2,
+          },
+        })
+      }
+    }
+
+    if (map.isStyleLoaded()) draw()
+    else map.once('idle', draw)
+
+    return () => {
+      map.off('idle', draw)
+      if (map.isStyleLoaded()) {
+        if (map.getLayer(LABEL_LAYER)) map.removeLayer(LABEL_LAYER)
+        if (map.getSource(LABEL_SOURCE)) map.removeSource(LABEL_SOURCE)
+        if (map.getLayer(LAYER)) map.removeLayer(LAYER)
+        if (map.getSource(SOURCE)) map.removeSource(SOURCE)
+      }
+    }
+  }, [stepHighlightGeometry, stepHighlightName])
 
   return <div ref={mapContainer} className="w-full h-full" />
 }

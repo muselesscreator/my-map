@@ -20,6 +20,15 @@ interface RoutePopoverProps {
   onSelectIdx: (i: number) => void
   onClose: () => void
   editingRoute?: Route
+  // For home↔location round-trip routes
+  returnData?: {
+    candidates: Array<RouteCandidate | null>
+    startCoordinates: { lat: number; lng: number }
+    endCoordinates: { lat: number; lng: number }
+    startLocationId: string | null
+    endLocationId: string | null
+  }
+  groupId?: string
 }
 
 const COLORS = ['#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899']
@@ -35,6 +44,7 @@ function formatDuration(seconds: number) {
 export default function RoutePopover({
   candidates, startCoordinates, endCoordinates,
   startLocationId, endLocationId, selectedIdx, onSelectIdx, onClose, editingRoute,
+  returnData, groupId,
 }: RoutePopoverProps) {
   const { addRoute, updateRoute, project } = useMapStore()
   const fromName = startLocationId ? project.locations.find(l => l.id === startLocationId)?.name : null
@@ -90,7 +100,29 @@ export default function RoutePopover({
           color,
           notes: notes.trim() || undefined,
           steps: c.steps,
+          groupId,
         })
+        // Save the paired return route if present
+        if (returnData) {
+          const rc = returnData.candidates[i]
+          if (rc) {
+            const returnLabel = baseLabel ? `${baseLabel} (return)` : undefined
+            addRoute({
+              label: multi ? (returnLabel ? `${returnLabel} (${suffix})` : undefined) : returnLabel,
+              startLocationId: returnData.startLocationId,
+              endLocationId: returnData.endLocationId,
+              startCoordinates: returnData.startCoordinates,
+              endCoordinates: returnData.endCoordinates,
+              geometry: rc.geometry,
+              distanceMeters: rc.distanceMeters,
+              durationSeconds: rc.durationSeconds,
+              color,
+              notes: notes.trim() || undefined,
+              steps: rc.steps,
+              groupId,
+            })
+          }
+        }
       }
     }
     onClose()
@@ -105,7 +137,7 @@ export default function RoutePopover({
 
       {(fromName || toName) && (
         <div className="mb-3 px-3 py-2 bg-blue-50 rounded-lg border border-blue-200 text-sm text-blue-700 font-medium truncate">
-          {fromName ?? '?'} → {toName ?? '?'}
+          {fromName ?? '?'} {returnData ? '↔' : '→'} {toName ?? '?'}
         </div>
       )}
 
